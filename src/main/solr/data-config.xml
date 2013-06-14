@@ -1,0 +1,9 @@
+<dataConfig>
+  <document>
+      <entity name="fsmail" processor="FsMailEntityProcessor" 
+      	dataDir="X:\\var\\gmail"
+      	domain="foo.com"
+      	ignoreFrom="webmaster@foo.com,root@foo.com"
+      />
+  </document>
+</dataConfig>
