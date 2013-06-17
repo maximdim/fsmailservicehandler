@@ -68,7 +68,6 @@ import org.slf4j.LoggerFactory;
  */
 public class FsMailEntityProcessor extends EntityProcessorBase {
   static final Logger LOG = LoggerFactory.getLogger(FsMailEntityProcessor.class);
-  private static final String ID_DATE_TIME_FORMAT = "yyyyMMddHHmmss";
 
   // Fields To Index
   // single valued
@@ -143,9 +142,13 @@ public class FsMailEntityProcessor extends EntityProcessorBase {
   public Map<String, Object> nextRow() {
     while(this.fileNames.hasNext()) {
       File file = new File(this.fileNames.next());
-      FileInfo fi = getFileInfo(file);
-      if (fi == null) {
-        throw new IllegalStateException("We should be able to parse FileInfo here ["+file.getName()+"]");
+      FileInfo fi = null;
+      try {
+        fi = new FileInfo(file);
+      } 
+      catch (InvalidFileException e) {
+        LOG.error("We should be able to parse this FileInfo here: "+e.getMessage()+": "+file.getName());
+        continue;
       }
       
       Message message = readMessage(session, file);
@@ -156,8 +159,9 @@ public class FsMailEntityProcessor extends EntityProcessorBase {
       if (row == null) {
         continue;
       }
+      // use file name as id - it's guaranteed to be unique
+      row.put(MESSAGE_ID, fi.id);
       row.put(USER_ID, fi.user);
-      updateMessageId(row);
       LOG.info("Processed "+file.getAbsolutePath());
       return row;
     }
@@ -180,17 +184,6 @@ public class FsMailEntityProcessor extends EntityProcessorBase {
     }
   }
   
-  // modify messageId to include user and time (not sure if messageId is unique across many users)
-  private void updateMessageId(Map<String, Object> row) {
-    String user = (String)row.get(USER_ID);
-    String id = (String)row.get(MESSAGE_ID);
-    Date receivedDate = (Date)row.get(RECEIVED_DATE);
-    SimpleDateFormat df = new SimpleDateFormat(ID_DATE_TIME_FORMAT);
-    String date = receivedDate != null ? df.format(receivedDate) : "unknown";
-    row.put(MESSAGE_ID, user+":"+date+":"+id);
-    
-  }
-
   private Map<String, Object> getDocumentFromMail(Message mail) {
     Map<String, Object> row = new HashMap<String, Object>();
     try {
@@ -440,49 +433,59 @@ public class FsMailEntityProcessor extends EntityProcessorBase {
       return true;
     }
     
-    FileInfo fi = getFileInfo(f);
-    if (fi == null) {
+    try {
+      FileInfo fi = new FileInfo(f);
+      return fi.date.after(since);
+    } 
+    catch (InvalidFileException e) {
+      LOG.error(e.getMessage());
       return false;
     }
-    return fi.date.after(since);
   }
   
-  /** split file name by user and date. Expect file name, not absolute path
-   */
-  private FileInfo getFileInfo(File f) {
-    String name = f.getName();
-    if (!name.endsWith(".mail")) {
-      return null;
-    }
-    // gmailbackup creates files with following format: "user_yyyyMMdd'T'HHmmss.mail"
-    SimpleDateFormat df = new SimpleDateFormat("yyyyMMdd'T'HHmmss");
-    
-    // remove extension
-    name = name.substring(0, name.lastIndexOf('.'));
-    // split by user and date
-    String[] parts = name.split("_");
-    if (parts.length != 2) {
-      return null;
-    }
-    try {
-      Date d = df.parse(parts[1]);
-      return new FileInfo(parts[0], d);
-    } 
-    catch (ParseException e) {
-      LOG.warn("Unable to parse date from file "+name);
-      return null;
-    }
-    
-  }
-
   static class FileInfo {
+    final String id;
     final String user;
     final Date date;
+    final String hash;
     
-    FileInfo(String user, Date date) {
-      this.user = user;
-      this.date = date;
+    FileInfo(File f) throws InvalidFileException {
+      String name = f.getName();
+      if (!name.endsWith(".mail")) {
+        throw new InvalidFileException("File name not recognized ["+name+"]");
+      }
+      // gmailbackup creates files with following format: "user_yyyyMMdd'T'HHmmss.mail"
+      SimpleDateFormat df = new SimpleDateFormat("yyyyMMdd'T'HHmmss");
+      
+      // remove extension
+      name = name.substring(0, name.lastIndexOf('.'));
+      this.id = name;
+      // split by user and date
+      String[] parts = name.split("_");
+      if (parts.length != 3) {
+        throw new InvalidFileException("Not parseable file name ["+name+"]");
+      }
+      this.user = parts[0];
+      this.hash = parts[2];
+      try {
+        this.date = df.parse(parts[1]);
+      } 
+      catch (ParseException e) {
+        throw new InvalidFileException("Unable to parse date from file ["+name+"]");
+      }
     }
+  }
+  
+  static class InvalidFileException extends Exception {
+    public InvalidFileException(String message) {
+      super(message);
+    }
+
+    public InvalidFileException(String message, Throwable cause) {
+      super(message, cause);
+    }
+
+    private static final long serialVersionUID = 1L;
   }
   
 }
