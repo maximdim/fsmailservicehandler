@@ -114,10 +114,6 @@ public class FsMailEntityProcessor extends EntityProcessorBase {
     LOG.info("ignoreFrom: "+this.ignoreFrom);
 
     Date since = getSince(context);
-    
-    Calendar c = Calendar.getInstance();
-    c.set(Calendar.DAY_OF_MONTH, 17);
-    since = c.getTime();
     if (since != null) {
       LOG.info("Since: "+since);
     }
