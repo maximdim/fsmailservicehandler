@@ -27,6 +27,7 @@ import java.text.ParseException;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Calendar;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.Iterator;
@@ -48,6 +49,7 @@ import javax.mail.internet.ContentType;
 import javax.mail.internet.InternetAddress;
 import javax.mail.internet.MimeMessage;
 
+import org.apache.commons.lang.time.DateUtils;
 import org.apache.tika.Tika;
 import org.apache.tika.metadata.HttpHeaders;
 import org.apache.tika.metadata.Metadata;
@@ -112,6 +114,10 @@ public class FsMailEntityProcessor extends EntityProcessorBase {
     LOG.info("ignoreFrom: "+this.ignoreFrom);
 
     Date since = getSince(context);
+    
+    Calendar c = Calendar.getInstance();
+    c.set(Calendar.DAY_OF_MONTH, 17);
+    since = c.getTime();
     if (since != null) {
       LOG.info("Since: "+since);
     }
@@ -410,9 +416,7 @@ public class FsMailEntityProcessor extends EntityProcessorBase {
     dir.listFiles(new FileFilter() {
       @Override
       public boolean accept(File f) {
-        if (f.isDirectory()) {
-          // TODO: Could optimize here because path to data file has full date, e.g.:
-          // foo.com/2013/05/11/user_20130611T092053.mail 
+        if (f.isDirectory() && shouldAcceptDirectory(f, since)) {
           getFolderFiles(f, since, fileNames);
         } 
         else {
@@ -421,6 +425,32 @@ public class FsMailEntityProcessor extends EntityProcessorBase {
           }
         }
         return false;
+      }
+
+      private final SimpleDateFormat df = new SimpleDateFormat("yyyy"+File.separator+"MM"+File.separator+"dd");
+
+      // Optimization because path to data file has full date, e.g.:
+      // foo.com/2013/05/11/user_20130611T092053.mail 
+      private boolean shouldAcceptDirectory(File dir, Date since) {
+        if (since == null) {
+          return true;
+        }
+        String name = dir.getAbsolutePath();
+        if (name.length() < 10) {
+          return true;
+        }
+        try {
+          Date dirDate = df.parse(name.substring(name.length() - 10));
+          since = DateUtils.truncate(since, Calendar.DAY_OF_MONTH);
+          boolean oldDir = dirDate.before(since);
+          if (oldDir) {
+            LOG.info("Skipping old directory: "+dir);
+          }
+          return !oldDir;
+        }
+        catch (ParseException e) {
+          return true;
+        }
       }
     });
   }
@@ -444,6 +474,8 @@ public class FsMailEntityProcessor extends EntityProcessorBase {
   }
   
   static class FileInfo {
+    // gmailbackup creates files with following format: "user_yyyyMMdd'T'HHmmss.mail"
+    private final static SimpleDateFormat DF = new SimpleDateFormat("yyyyMMdd'T'HHmmss"); 
     final String id;
     final String user;
     final Date date;
@@ -454,9 +486,6 @@ public class FsMailEntityProcessor extends EntityProcessorBase {
       if (!name.endsWith(".mail")) {
         throw new InvalidFileException("File name not recognized ["+name+"]");
       }
-      // gmailbackup creates files with following format: "user_yyyyMMdd'T'HHmmss.mail"
-      SimpleDateFormat df = new SimpleDateFormat("yyyyMMdd'T'HHmmss");
-      
       // remove extension
       name = name.substring(0, name.lastIndexOf('.'));
       this.id = name;
@@ -468,7 +497,7 @@ public class FsMailEntityProcessor extends EntityProcessorBase {
       this.user = parts[0];
       this.hash = parts[2];
       try {
-        this.date = df.parse(parts[1]);
+        this.date = DF.parse(parts[1]);
       } 
       catch (ParseException e) {
         throw new InvalidFileException("Unable to parse date from file ["+name+"]");
