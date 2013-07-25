@@ -81,6 +81,9 @@ public class FsMailEntityProcessor extends EntityProcessorBase {
   private static final String SENT_DATE = "sentDate";
   private static final String RECEIVED_DATE = "receivedDate";
   private static final String XMAILER = "xMailer";
+  // first 'To' address - need it for sorting. Sort is impossible for multivalued fields
+  private static final String TO = "to";
+  private static final String TO_CLEAN = "to_clean";
   // multi valued
   private static final String TO_CC_BCC = "allTo";
   private static final String TO_CC_BCC_CLEAN = "allTo_clean";
@@ -287,7 +290,11 @@ public class FsMailEntityProcessor extends EntityProcessorBase {
     }
     if (!to.isEmpty()) {
       row.put(TO_CC_BCC, to);
-      row.put(TO_CC_BCC_CLEAN, cleanAddresses(to));
+      List<String> cleanAddresses = cleanAddresses(to);
+      row.put(TO_CC_BCC_CLEAN, cleanAddresses);
+      // save first TO address into separate field
+      row.put(TO, to.get(0));
+      row.put(TO_CLEAN, cleanAddresses.get(0));
     }
 
     row.put(MESSAGE_ID, mail.getMessageID());
