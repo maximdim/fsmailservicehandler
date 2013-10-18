@@ -116,8 +116,13 @@ public class FsMailEntityProcessor extends EntityProcessorBase {
     LOG.info("datadir: "+this.dataDir);
     LOG.info("ignoreFrom: "+this.ignoreFrom);
 
-    Date since = getSince(context);
-    if (since != null) {
+    Date since = null;
+    if (context.currentProcess().contains("FULL")) {
+      LOG.info("Full dump");
+    }
+    else {
+      LOG.info("Delta dump");
+      since = getSince(context);
       LOG.info("Since: "+since);
     }
     
@@ -131,7 +136,7 @@ public class FsMailEntityProcessor extends EntityProcessorBase {
   private Date getSince(Context c) {
     // perhaps there is a better way to get last index time?
     String sinceStr = context.replaceTokens("${dataimporter.last_index_time}");
-    if (!sinceStr.contains("1969")) { // if there are no last delat time (e.g. file removed) date in 1969 is returned
+    if (!sinceStr.contains("1969")) { // if there are no last delta time (e.g. file removed) date in 1969 is returned
       SimpleDateFormat df = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
       try {
         return df.parse(sinceStr);
