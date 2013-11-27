@@ -139,7 +139,14 @@ public class FsMailEntityProcessor extends EntityProcessorBase {
     if (!sinceStr.contains("1969")) { // if there are no last delta time (e.g. file removed) date in 1969 is returned
       SimpleDateFormat df = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
       try {
-        return df.parse(sinceStr);
+        Date date = df.parse(sinceStr);
+        // it seems that last updated time is saved at the end of the run so there is a window
+        // when some new files could be written which would fall into the crack so we would
+        // move this time few minutes earlier. Not particularly nice hack
+        Calendar cal = Calendar.getInstance();
+        cal.setTime(date);
+        cal.add(Calendar.MINUTE, -2);
+        return cal.getTime();
       } 
       catch (ParseException e) {
         LOG.error("Failed to parse date: ["+sinceStr+"]");
