@@ -116,8 +116,9 @@ public class FsMailEntityProcessor extends EntityProcessorBase {
     LOG.info("datadir: "+this.dataDir);
     LOG.info("ignoreFrom: "+this.ignoreFrom);
 
+    LOG.info("Current process: "+context.currentProcess());
     Date since = null;
-    if (context.currentProcess().contains("FULL")) {
+    if (context.currentProcess().toUpperCase().contains("FULL")) {
       LOG.info("Full dump");
     }
     else {
