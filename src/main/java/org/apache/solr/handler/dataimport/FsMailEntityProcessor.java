@@ -116,16 +116,12 @@ public class FsMailEntityProcessor extends EntityProcessorBase {
     LOG.info("datadir: "+this.dataDir);
     LOG.info("ignoreFrom: "+this.ignoreFrom);
 
+    // We don't distinguish between full and delta import here. Always need to be triggered
+    // as FULL dump but we would look at date from 'dataimport.properties' to determine last index time
+    // and only process delta changes
     LOG.info("Current process: "+context.currentProcess());
-    Date since = null;
-    if (context.currentProcess().toUpperCase().contains("FULL")) {
-      LOG.info("Full dump");
-    }
-    else {
-      LOG.info("Delta dump");
-      since = getSince(context);
-      LOG.info("Since: "+since);
-    }
+    Date since = getSince(context);
+    LOG.info("Since: "+since);
     
     List<String> files = new ArrayList<String>();
     getFolderFiles(dataDir, since, files);
