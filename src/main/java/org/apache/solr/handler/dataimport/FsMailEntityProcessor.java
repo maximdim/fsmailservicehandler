@@ -17,11 +17,9 @@
 package org.apache.solr.handler.dataimport;
 
 import java.io.BufferedInputStream;
-import java.io.Closeable;
 import java.io.File;
 import java.io.FileFilter;
 import java.io.FileInputStream;
-import java.io.IOException;
 import java.io.InputStream;
 import java.text.ParseException;
 import java.text.SimpleDateFormat;
@@ -36,6 +34,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Properties;
 import java.util.regex.Pattern;
+import java.util.zip.GZIPInputStream;
 
 import javax.mail.Address;
 import javax.mail.Flags;
@@ -185,19 +184,24 @@ public class FsMailEntityProcessor extends EntityProcessorBase {
     return null;
   }
 
-  @SuppressWarnings("resource")
   private Message readMessage(Session session, File f) {
-    BufferedInputStream is = null;
-    try {
-      is = new BufferedInputStream(new FileInputStream(f));
-      return new MimeMessage(session, is);
+    if (f.getName().toLowerCase().endsWith(".gz")) { // gzipped file
+      try (GZIPInputStream is = new GZIPInputStream(new FileInputStream(f))) { // already buffered
+        return new MimeMessage(session, is);
+      }
+      catch (Exception e) {
+        LOG.error("Error indexing message from "+f.getAbsolutePath()+": "+e.getMessage(), e);
+        return null;
+      }
     }
-    catch (Exception e) {
-      LOG.error("Error indexing message from "+f.getAbsolutePath()+": "+e.getMessage(), e);
-      return null;
-    }
-    finally {
-      close(is);
+    else { // regular file
+      try (BufferedInputStream is = new BufferedInputStream(new FileInputStream(f))) {
+        return new MimeMessage(session, is);
+      }
+      catch (Exception e) {
+        LOG.error("Error indexing message from "+f.getAbsolutePath()+": "+e.getMessage(), e);
+        return null;
+      }
     }
   }
   
@@ -214,6 +218,7 @@ public class FsMailEntityProcessor extends EntityProcessorBase {
     }
   }
 
+  @SuppressWarnings("unchecked")
   public boolean addPartToDocument(Part part, Map<String, Object> row, boolean outerMost) throws Exception {
     if (outerMost && part instanceof Message) {
       if (!addEnvelopToDocument(part, row)) {
@@ -414,17 +419,6 @@ public class FsMailEntityProcessor extends EntityProcessorBase {
     return v;
   }
   
-  private void close(Closeable c) {
-    if (c != null) {
-      try {
-        c.close();
-      }
-      catch (IOException e) {
-        LOG.warn("Error closing Closeable: "+e.getMessage(), e);
-      }
-    }
-  }
-
   void getFolderFiles(File dir, final Date since, final List<String> fileNames) {
     // Fetch an list of file objects that pass the filter, however the
     // returned array is never populated; accept() always returns false.
