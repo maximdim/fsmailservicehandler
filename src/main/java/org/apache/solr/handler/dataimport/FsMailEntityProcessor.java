@@ -494,7 +494,7 @@ public class FsMailEntityProcessor extends EntityProcessorBase {
     
     FileInfo(File f) throws InvalidFileException {
       String name = f.getName();
-      if (!name.endsWith(".mail") || !name.endsWith(".mail.gz")) {
+      if (!(name.endsWith(".mail") || name.endsWith(".mail.gz"))) {
         throw new InvalidFileException("File name not recognized ["+name+"]");
       }
       // remove extension
