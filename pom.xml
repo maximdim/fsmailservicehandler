@@ -3,7 +3,7 @@
   <modelVersion>4.0.0</modelVersion>
   <groupId>com.maximdim</groupId>
   <artifactId>fsmailservicehandler</artifactId>
-  <version>0.0.2-SNAPSHOT</version>
+  <version>0.0.3-SNAPSHOT</version>
 
   <properties>
     <java.version>1.7</java.version>

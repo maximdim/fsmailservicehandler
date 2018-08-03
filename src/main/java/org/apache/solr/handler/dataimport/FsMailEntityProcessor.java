@@ -33,6 +33,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Properties;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.zip.GZIPInputStream;
 
@@ -381,7 +382,7 @@ public class FsMailEntityProcessor extends EntityProcessorBase {
    * @return 'clean' email address or null if it doesn't look like email address
    */
   private static String cleanAddress(String a) {
-    if (a == null || a.trim().length() == 0) {
+    if (a == null || a.trim().isEmpty()) {
       return null;
     }
     int i = a.indexOf('<');
@@ -439,6 +440,7 @@ public class FsMailEntityProcessor extends EntityProcessorBase {
       }
 
       private final SimpleDateFormat df = new SimpleDateFormat("yyyy"+File.separator+"MM"+File.separator+"dd");
+      private final Pattern YEAR_PATTERN = Pattern.compile(".*/(20\\d{2})/\\d{2}/\\d{2}/.*");
 
       // Optimization because path to data file has full date, e.g.:
       // foo.com/2013/05/11/user_20130611T092053.mail 
@@ -447,9 +449,23 @@ public class FsMailEntityProcessor extends EntityProcessorBase {
           return true;
         }
         String name = dir.getAbsolutePath();
+
+        {
+          // skip whole year folder if before since
+          Matcher matcher = YEAR_PATTERN.matcher(name);
+          if (matcher.find()) {
+            int dirYear = Integer.parseInt(matcher.group());
+            if (dirYear < since.getYear()) {
+              LOG.info("Skipping old year: "+dir);
+              return false;
+            }
+          }
+        }
+
         if (name.length() < 10) {
           return true;
         }
+
         try {
           Date dirDate = df.parse(name.substring(name.length() - 10));
           since = DateUtils.truncate(since, Calendar.DAY_OF_MONTH);
