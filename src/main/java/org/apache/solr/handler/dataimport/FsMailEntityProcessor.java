@@ -226,7 +226,7 @@ public class FsMailEntityProcessor extends EntityProcessorBase {
         return false;
       }
       // store hash
-      row.put(HASH, DigestUtils.md5Hex((String)row.get(FROM_CLEAN)+""+(String)row.get(SUBJECT)));
+      row.put(HASH, DigestUtils.md5Hex(row.get(FROM_CLEAN) +""+ row.get(SUBJECT)));
     }
 
     String ct = part.getContentType();
@@ -440,7 +440,7 @@ public class FsMailEntityProcessor extends EntityProcessorBase {
       }
 
       private final SimpleDateFormat df = new SimpleDateFormat("yyyy"+File.separator+"MM"+File.separator+"dd");
-      private final Pattern YEAR_PATTERN = Pattern.compile(".*/(20\\d{2})/\\d{2}/\\d{2}/.*");
+      private final Pattern YEAR_PATTERN = Pattern.compile(".*/(20\\d{2}).*");
 
       // Optimization because path to data file has full date, e.g.:
       // foo.com/2013/05/11/user_20130611T092053.mail 
@@ -449,13 +449,14 @@ public class FsMailEntityProcessor extends EntityProcessorBase {
           return true;
         }
         String name = dir.getAbsolutePath();
+        LOG.info("name: [" + name + "]");
 
         {
           // skip whole year folder if before since
           Matcher matcher = YEAR_PATTERN.matcher(name);
           if (matcher.find()) {
-            int dirYear = Integer.parseInt(matcher.group());
-            if (dirYear < since.getYear()) {
+            int dirYear = Integer.parseInt(matcher.group(1));
+            if (dirYear < 1900 + since.getYear()) {
               LOG.info("Skipping old year: "+dir);
               return false;
             }
@@ -533,12 +534,8 @@ public class FsMailEntityProcessor extends EntityProcessorBase {
   }
   
   static class InvalidFileException extends Exception {
-    public InvalidFileException(String message) {
+    InvalidFileException(String message) {
       super(message);
-    }
-
-    public InvalidFileException(String message, Throwable cause) {
-      super(message, cause);
     }
 
     private static final long serialVersionUID = 1L;
