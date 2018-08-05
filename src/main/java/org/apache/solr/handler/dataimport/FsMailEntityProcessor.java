@@ -449,7 +449,7 @@ public class FsMailEntityProcessor extends EntityProcessorBase {
           return true;
         }
         String name = dir.getAbsolutePath();
-        LOG.info("name: [" + name + "]");
+        //LOG.info("name: [" + name + "]");
 
         {
           // skip whole year folder if before since
