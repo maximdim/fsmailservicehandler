@@ -225,8 +225,8 @@ public class FsMailEntityProcessor extends EntityProcessorBase {
       if (!addEnvelopToDocument(part, row)) {
         return false;
       }
-      // store hash
-      row.put(HASH, DigestUtils.md5Hex(row.get(FROM_CLEAN) +""+ row.get(SUBJECT)));
+      // store hash - used to filter out non-unique messages on retrieval
+      row.put(HASH, DigestUtils.md5Hex(row.get(FROM_CLEAN) + "|" + row.get(TO_CLEAN) +"|"+ row.get(SENT_DATE) + "|" + row.get(SUBJECT)));
     }
 
     String ct = part.getContentType();
