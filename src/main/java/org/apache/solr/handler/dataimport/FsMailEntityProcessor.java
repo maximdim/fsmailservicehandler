@@ -113,6 +113,10 @@ public class FsMailEntityProcessor extends EntityProcessorBase {
   @Override
   public void init(Context context) {
     super.init(context);
+
+    // see https://javaee.github.io/javamail/FAQ#castmultipart
+    Thread.currentThread().setContextClassLoader(this.getClass().getClassLoader());
+
     this.dataDir = new File(getStringFromContext("dataDir", null));
     this.ignoreFrom = Arrays.asList(getStringFromContext("ignoreFrom", "qwe123").split(","));
     
@@ -159,6 +163,7 @@ public class FsMailEntityProcessor extends EntityProcessorBase {
   public Map<String, Object> nextRow() {
     while(this.fileNames.hasNext()) {
       File file = new File(this.fileNames.next());
+      //LOG.info("Processing "+file.getAbsolutePath());
       FileInfo fi = null;
       try {
         fi = new FileInfo(file);
@@ -232,6 +237,7 @@ public class FsMailEntityProcessor extends EntityProcessorBase {
     String ct = part.getContentType();
     ContentType ctype = new ContentType(ct);
     if (part.isMimeType("multipart/*")) {
+      //LOG.info("MimeType: "+ct + ": " + part.getContent().getClass().getName());
       Multipart mp = (Multipart) part.getContent();
       int count = mp.getCount();
       if (part.isMimeType("multipart/alternative")) {
@@ -314,7 +320,9 @@ public class FsMailEntityProcessor extends EntityProcessorBase {
       row.put(TO_CC_BCC_CLEAN, cleanAddresses);
       // save first TO address into separate field
       row.put(TO, to.get(0));
-      row.put(TO_CLEAN, cleanAddresses.get(0));
+      if (!cleanAddresses.isEmpty()) {
+        row.put(TO_CLEAN, cleanAddresses.get(0));
+      }
     }
 
     row.put(MESSAGE_ID, mail.getMessageID());
@@ -449,7 +457,7 @@ public class FsMailEntityProcessor extends EntityProcessorBase {
           return true;
         }
         String name = dir.getAbsolutePath();
-        //LOG.info("name: [" + name + "]");
+        LOG.info("name: [" + name + "]");
 
         {
           // skip whole year folder if before since
@@ -496,7 +504,7 @@ public class FsMailEntityProcessor extends EntityProcessorBase {
       return fi.date.after(since);
     } 
     catch (InvalidFileException e) {
-      LOG.error(e.getMessage());
+      LOG.error(e.getMessage(), e);
       return false;
     }
   }
