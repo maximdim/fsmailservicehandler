@@ -128,7 +128,7 @@ public class FsMailEntityProcessor extends EntityProcessorBase {
     // and only process delta changes
     LOG.info("Current process: "+context.currentProcess());
     Date since = getSince(context);
-    LOG.info("Since: "+since);
+    LOG.info("Using since: "+since);
     
     List<String> files = new ArrayList<String>();
     getFolderFiles(dataDir, since, files);
@@ -146,10 +146,11 @@ public class FsMailEntityProcessor extends EntityProcessorBase {
         Date date = df.parse(sinceStr);
         // it seems that last updated time is saved at the end of the run so there is a window
         // when some new files could be written which would fall into the crack so we would
-        // move this time few minutes earlier. Not particularly nice hack
+        // move this time back. Not particularly nice hack
         Calendar cal = Calendar.getInstance();
         cal.setTime(date);
-        cal.add(Calendar.MINUTE, -2);
+        cal.add(Calendar.HOUR, -2);
+        LOG.info("Since date " + date + "->" + cal.getTime());
         return cal.getTime();
       } 
       catch (ParseException e) {

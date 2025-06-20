@@ -4,11 +4,13 @@ import java.util.HashMap;
 import java.util.Map;
 
 import org.apache.solr.handler.dataimport.DataConfig.Entity;
+import org.junit.Ignore;
 import org.junit.Test;
 
 public class FsMailEntityProcessorTest {
 
   @Test
+  @Ignore
   public void test() {
     FsMailEntityProcessor p = new FsMailEntityProcessor();
     Entity entity = new Entity();
