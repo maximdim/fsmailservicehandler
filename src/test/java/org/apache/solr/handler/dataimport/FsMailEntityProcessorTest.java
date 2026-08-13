@@ -22,8 +22,6 @@ import javax.mail.internet.MimeBodyPart;
 import javax.mail.internet.MimeMessage;
 import javax.mail.internet.MimeMultipart;
 
-import org.apache.solr.handler.dataimport.DataConfig.Entity;
-import org.junit.Ignore;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
@@ -32,25 +30,6 @@ public class FsMailEntityProcessorTest {
 
   @Rule
   public TemporaryFolder tmp = new TemporaryFolder();
-
-  @Test
-  @Ignore
-  public void test() {
-    FsMailEntityProcessor p = new FsMailEntityProcessor();
-    Entity entity = new Entity();
-    entity.allAttributes = new HashMap<String, String>();
-    entity.allAttributes.put("dataDir", System.getProperty("dataDir"));
-    entity.allAttributes.put("ignoreFrom", System.getProperty("ignoreFrom"));
-    Context ctx = new ContextImpl(entity, new VariableResolverImpl(), null, null, null, null, null);
-
-    p.firstInit(ctx);
-    p.init(ctx);
-    Map<String, Object> row = null;
-    while((row = p.nextRow()) != null) {
-      System.out.println(row);
-    }
-    p.close();
-  }
 
   /**
    * The bug this guards against: mail backfilled today carries an old *received* date in its file

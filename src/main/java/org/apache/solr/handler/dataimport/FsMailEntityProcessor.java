@@ -117,7 +117,18 @@ public class FsMailEntityProcessor extends EntityProcessorBase {
     // see https://javaee.github.io/javamail/FAQ#castmultipart
     Thread.currentThread().setContextClassLoader(this.getClass().getClassLoader());
 
-    this.dataDir = new File(getStringFromContext("dataDir", null));
+    // Validate up front. An unreadable dataDir makes listFiles() return null, and the walk then
+    // quietly yields nothing - the import would report success having indexed zero documents.
+    String dataDirName = getStringFromContext("dataDir", null);
+    if (dataDirName == null) {
+      throw new DataImportHandlerException(DataImportHandlerException.SEVERE,
+          "'dataDir' attribute is required");
+    }
+    this.dataDir = new File(dataDirName);
+    if (!this.dataDir.isDirectory()) {
+      throw new DataImportHandlerException(DataImportHandlerException.SEVERE,
+          "dataDir ["+this.dataDir.getAbsolutePath()+"] is not an existing directory");
+    }
     this.ignoreFrom = Arrays.asList(getStringFromContext("ignoreFrom", "qwe123").split(","));
     
     LOG.info("datadir: "+this.dataDir);
@@ -527,13 +538,11 @@ public class FsMailEntityProcessor extends EntityProcessorBase {
   }
   
   static class FileInfo {
-    // gmailbackup creates files with following format: "user_yyyyMMdd'T'HHmmss.mail"
-    private final static SimpleDateFormat DF = new SimpleDateFormat("yyyyMMdd'T'HHmmss"); 
+    // gmailbackup creates files with following format: "user_yyyyMMdd'T'HHmmss_hash.mail"
+    private static final String DATE_PATTERN = "yyyyMMdd'T'HHmmss";
     final String id;
     final String user;
-    final Date date;
-    final String hash;
-    
+
     FileInfo(File f) throws InvalidFileException {
       String name = f.getName();
       if (!(name.endsWith(".mail") || name.endsWith(".mail.gz"))) {
@@ -542,16 +551,19 @@ public class FsMailEntityProcessor extends EntityProcessorBase {
       // remove extension
       name = name.substring(0, name.lastIndexOf('.'));
       this.id = name;
-      // split by user and date
+      // split by user, date and hash
       String[] parts = name.split("_");
       if (parts.length != 3) {
         throw new InvalidFileException("Not parseable file name ["+name+"]");
       }
       this.user = parts[0];
-      this.hash = parts[2];
       try {
-        this.date = DF.parse(parts[1]);
-      } 
+        // The parsed value is unused - files are selected by modification time now - but a name
+        // whose date we can't read is a name we don't understand, so reject it here rather than
+        // letting nextRow() choke on it. SimpleDateFormat is not thread safe, so build one per
+        // parse instead of sharing a static instance.
+        new SimpleDateFormat(DATE_PATTERN, Locale.US).parse(parts[1]);
+      }
       catch (ParseException e) {
         throw new InvalidFileException("Unable to parse date from file ["+name+"]");
       }
