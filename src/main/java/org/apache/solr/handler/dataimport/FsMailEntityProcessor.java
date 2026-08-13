@@ -33,7 +33,6 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Properties;
-import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.zip.GZIPInputStream;
 
@@ -50,7 +49,6 @@ import javax.mail.internet.InternetAddress;
 import javax.mail.internet.MimeMessage;
 
 import org.apache.commons.codec.digest.DigestUtils;
-import org.apache.commons.lang.time.DateUtils;
 import org.apache.tika.Tika;
 import org.apache.tika.metadata.HttpHeaders;
 import org.apache.tika.metadata.Metadata;
@@ -137,6 +135,13 @@ public class FsMailEntityProcessor extends EntityProcessorBase {
     this.fileNames = files.iterator();
   }
 
+  // The last index time is saved at the end of a run, so files written while that run was in
+  // progress would fall into the crack. Move the time back to cover that window, plus margin for
+  // a run that dies before writing its timestamp. Now that files are selected by modification
+  // time this only re-visits what was genuinely written in the last hour (~7 files per 5 minute
+  // run); it used to be 2 hours to paper over stale file name dates and re-indexed ~160 a run.
+  static final int SINCE_REWIND_MINUTES = 60;
+
   private Date getSince(Context c) {
     // perhaps there is a better way to get last index time?
     String sinceStr = context.replaceTokens("${dataimporter.last_index_time}");
@@ -144,12 +149,9 @@ public class FsMailEntityProcessor extends EntityProcessorBase {
       SimpleDateFormat df = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
       try {
         Date date = df.parse(sinceStr);
-        // it seems that last updated time is saved at the end of the run so there is a window
-        // when some new files could be written which would fall into the crack so we would
-        // move this time back. Not particularly nice hack
         Calendar cal = Calendar.getInstance();
         cal.setTime(date);
-        cal.add(Calendar.HOUR, -2);
+        cal.add(Calendar.MINUTE, -SINCE_REWIND_MINUTES);
         LOG.info("Since date " + date + "->" + cal.getTime());
         return cal.getTime();
       } 
@@ -434,12 +436,17 @@ public class FsMailEntityProcessor extends EntityProcessorBase {
     // returned array is never populated; accept() always returns false.
     // Rather we make use of the fileNames list which is populated as
     // a side affect of the accept method.
+    //
+    // Directories used to be pruned here by the yyyy/MM/dd in their path. That was wrong for the
+    // same reason the file name date was wrong (see shouldAcceptFile) - a message backfilled today
+    // lands in an old day folder, so pruning threw it away before any file inside was looked at.
+    // Walking everything costs ~1s for 133K files, which is affordable once per import run.
     dir.listFiles(new FileFilter() {
       @Override
       public boolean accept(File f) {
-        if (f.isDirectory() && shouldAcceptDirectory(f, since)) {
+        if (f.isDirectory()) {
           getFolderFiles(f, since, fileNames);
-        } 
+        }
         else {
           if (shouldAcceptFile(f, since)) {
             fileNames.add(f.getAbsolutePath());
@@ -447,63 +454,29 @@ public class FsMailEntityProcessor extends EntityProcessorBase {
         }
         return false;
       }
-
-      private final SimpleDateFormat df = new SimpleDateFormat("yyyy"+File.separator+"MM"+File.separator+"dd");
-      private final Pattern YEAR_PATTERN = Pattern.compile(".*/(20\\d{2}).*");
-
-      // Optimization because path to data file has full date, e.g.:
-      // foo.com/2013/05/11/user_20130611T092053.mail 
-      private boolean shouldAcceptDirectory(File dir, Date since) {
-        if (since == null) {
-          return true;
-        }
-        String name = dir.getAbsolutePath();
-        LOG.info("name: [" + name + "]");
-
-        {
-          // skip whole year folder if before since
-          Matcher matcher = YEAR_PATTERN.matcher(name);
-          if (matcher.find()) {
-            int dirYear = Integer.parseInt(matcher.group(1));
-            if (dirYear < 1900 + since.getYear()) {
-              LOG.info("Skipping old year: "+dir);
-              return false;
-            }
-          }
-        }
-
-        if (name.length() < 10) {
-          return true;
-        }
-
-        try {
-          Date dirDate = df.parse(name.substring(name.length() - 10));
-          since = DateUtils.truncate(since, Calendar.DAY_OF_MONTH);
-          boolean oldDir = dirDate.before(since);
-          if (oldDir) {
-            LOG.info("Skipping old directory: "+dir);
-          }
-          return !oldDir;
-        }
-        catch (ParseException e) {
-          return true;
-        }
-      }
     });
   }
-  
+
   boolean shouldAcceptFile(File f, Date since) {
     if (f.isDirectory()) {
       return false;
     }
-    if (since == null) {
+    String name = f.getName();
+    if (!(name.endsWith(".mail") || name.endsWith(".mail.gz"))) {
+      return false;
+    }
+    // Select on the file modification time rather than on the date in the file name. The name
+    // carries the date the message was *received*, so mail backfilled from an old date looks
+    // stale and would never be picked up, no matter when the file was actually written.
+    if (since != null && f.lastModified() <= since.getTime()) {
+      return false;
+    }
+
+    try {
+      // reject now what nextRow() wouldn't be able to parse later
+      new FileInfo(f);
       return true;
     }
-    
-    try {
-      FileInfo fi = new FileInfo(f);
-      return fi.date.after(since);
-    } 
     catch (InvalidFileException e) {
       LOG.error(e.getMessage(), e);
       return false;
