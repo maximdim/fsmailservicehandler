@@ -6,12 +6,21 @@ import static org.junit.Assert.assertTrue;
 
 import java.io.File;
 import java.io.IOException;
+import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.Calendar;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Properties;
+
+import javax.mail.Message;
+import javax.mail.Session;
+import javax.mail.internet.InternetAddress;
+import javax.mail.internet.MimeBodyPart;
+import javax.mail.internet.MimeMessage;
+import javax.mail.internet.MimeMultipart;
 
 import org.apache.solr.handler.dataimport.DataConfig.Entity;
 import org.junit.Ignore;
@@ -116,6 +125,76 @@ public class FsMailEntityProcessorTest {
     p.getFolderFiles(tmp.getRoot(), null, found);
 
     assertEquals(2, found.size());
+  }
+
+  /**
+   * A signed message carries a pkcs7 part Tika refuses to parse. That used to throw out of
+   * addPartToDocument and cost us the entire message - sender, subject, body and all. Only the
+   * unreadable part should be lost. Observed live: 3 of 3 sampled S/MIME messages were on disk
+   * and absent from Solr.
+   */
+  @Test
+  public void unreadablePartDoesNotDiscardTheMessage() throws Exception {
+    Session session = Session.getDefaultInstance(new Properties(), null);
+    MimeMessage msg = new MimeMessage(session);
+    msg.setFrom(new InternetAddress("alice@example.com"));
+    msg.setRecipients(Message.RecipientType.TO, "bob@example.com");
+    msg.setSubject("signed hello");
+    msg.setSentDate(new Date());
+
+    MimeBodyPart body = new MimeBodyPart();
+    body.setText("the readable body");
+
+    MimeBodyPart signature = new MimeBodyPart() {
+      @Override
+      public InputStream getInputStream() throws IOException {
+        throw new IOException("cannot parse detached pkcs7 signature (no signed data to parse)");
+      }
+    };
+    signature.setContent("garbage", "text/plain");
+    signature.setFileName("smime.p7s");
+
+    MimeMultipart mp = new MimeMultipart("signed");
+    mp.addBodyPart(body);
+    mp.addBodyPart(signature);
+    msg.setContent(mp);
+    msg.saveChanges();
+
+    Map<String, Object> row = new HashMap<String, Object>();
+    assertTrue(new FsMailEntityProcessor().addPartToDocument(msg, row, true));
+
+    assertEquals("alice@example.com", row.get("from_clean"));
+    assertEquals("signed hello", row.get("subject"));
+    assertTrue("readable part should survive", contentOf(row).contains("the readable body"));
+  }
+
+  /** Same guarantee when the message itself is the unreadable part - envelope still indexes. */
+  @Test
+  public void unreadableBodyStillIndexesTheEnvelope() throws Exception {
+    Session session = Session.getDefaultInstance(new Properties(), null);
+    MimeMessage msg = new MimeMessage(session) {
+      @Override
+      public InputStream getInputStream() throws IOException {
+        throw new IOException("unreadable");
+      }
+    };
+    msg.setFrom(new InternetAddress("alice@example.com"));
+    msg.setRecipients(Message.RecipientType.TO, "bob@example.com");
+    msg.setSubject("broken body");
+    msg.setText("never readable");
+    msg.saveChanges();
+
+    Map<String, Object> row = new HashMap<String, Object>();
+    assertTrue(new FsMailEntityProcessor().addPartToDocument(msg, row, true));
+
+    assertEquals("broken body", row.get("subject"));
+    assertEquals("alice@example.com", row.get("from_clean"));
+  }
+
+  @SuppressWarnings("unchecked")
+  private static String contentOf(Map<String, Object> row) {
+    List<String> content = (List<String>) row.get("content");
+    return content == null ? "" : content.toString();
   }
 
   /** Creates dataDir/&lt;path&gt;/&lt;name&gt; with the given last modified time. */

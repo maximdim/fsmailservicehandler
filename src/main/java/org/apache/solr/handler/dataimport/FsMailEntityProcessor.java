@@ -26,6 +26,7 @@ import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Calendar;
+import java.util.Collections;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.Iterator;
@@ -104,7 +105,8 @@ public class FsMailEntityProcessor extends EntityProcessorBase {
   private final Session session = Session.getDefaultInstance(new Properties(), null);
 
   private File dataDir;
-  private List<String> ignoreFrom;
+  // never null - init() replaces it, but the part handling must not NPE before that
+  private List<String> ignoreFrom = Collections.emptyList();
 
   private Iterator<String> fileNames;
 
@@ -227,7 +229,6 @@ public class FsMailEntityProcessor extends EntityProcessorBase {
     }
   }
 
-  @SuppressWarnings("unchecked")
   public boolean addPartToDocument(Part part, Map<String, Object> row, boolean outerMost) throws Exception {
     if (outerMost && part instanceof Message) {
       if (!addEnvelopToDocument(part, row)) {
@@ -247,45 +248,87 @@ public class FsMailEntityProcessor extends EntityProcessorBase {
         count = 1;
       }
       for (int i = 0; i < count; i++) {
-        addPartToDocument(mp.getBodyPart(i), row, false);
+        addPartQuietly(mp.getBodyPart(i), row);
       }
-    } 
+    }
     else if (part.isMimeType("message/rfc822")) {
-      addPartToDocument((Part) part.getContent(), row, false);
-    } 
+      addPartQuietly((Part) part.getContent(), row);
+    }
     else {
-      String disp = part.getDisposition();
+      addContentFromPart(part, ctype, row);
+    }
+    return true;
+  }
+
+  /**
+   * Indexes a nested part, absorbing anything it throws. One part we can't read - a detached
+   * pkcs7 signature Tika refuses, an encrypted attachment, a malformed Content-Type - used to
+   * abort the whole message, so a signed mail was dropped entirely rather than losing just its
+   * signature. Whatever else the message carries is still worth indexing.
+   */
+  private void addPartQuietly(Part part, Map<String, Object> row) {
+    try {
+      addPartToDocument(part, row, false);
+    }
+    catch (Exception e) {
+      LOG.warn("Skipping unreadable message part ["+describePart(part)+"]: "+e.getMessage());
+    }
+  }
+
+  /** Extracts the text of a leaf part into the content or attachment field. */
+  @SuppressWarnings("unchecked")
+  private void addContentFromPart(Part part, ContentType ctype, Map<String, Object> row) {
+    String content;
+    String fileName;
+    String disp;
+    try {
+      disp = part.getDisposition();
+      fileName = part.getFileName();
       @SuppressWarnings("resource") // Tika will close stream
       InputStream is = part.getInputStream();
-      String fileName = part.getFileName();
       Metadata md = new Metadata();
       md.set(HttpHeaders.CONTENT_TYPE, ctype.getBaseType().toLowerCase(Locale.ROOT));
       md.set(TikaMetadataKeys.RESOURCE_NAME_KEY, fileName);
-      String content = this.tika.parseToString(is, md);
-      if (disp != null && disp.equalsIgnoreCase(Part.ATTACHMENT)) {
-        if (row.get(ATTACHMENT) == null) {
-          row.put(ATTACHMENT, new ArrayList<String>());
-        }
-        List<String> contents = (List<String>) row.get(ATTACHMENT);
-        contents.add(content);
-        row.put(ATTACHMENT, contents);
-        if (row.get(ATTACHMENT_NAMES) == null) {
-          row.put(ATTACHMENT_NAMES, new ArrayList<String>());
-        }
-        List<String> names = (List<String>) row.get(ATTACHMENT_NAMES);
-        names.add(fileName);
-        row.put(ATTACHMENT_NAMES, names);
-      } 
-      else {
-        if (row.get(CONTENT) == null) {
-          row.put(CONTENT, new ArrayList<String>());
-        }
-        List<String> contents = (List<String>) row.get(CONTENT);
-        contents.add(content);
-        row.put(CONTENT, contents);
-      }
+      content = this.tika.parseToString(is, md);
     }
-    return true;
+    catch (Exception e) {
+      // see addPartQuietly - an unreadable part must not cost us the rest of the message
+      LOG.warn("Skipping unreadable message part ["+describePart(part)+"]: "+e.getMessage());
+      return;
+    }
+
+    if (disp != null && disp.equalsIgnoreCase(Part.ATTACHMENT)) {
+      if (row.get(ATTACHMENT) == null) {
+        row.put(ATTACHMENT, new ArrayList<String>());
+      }
+      List<String> contents = (List<String>) row.get(ATTACHMENT);
+      contents.add(content);
+      row.put(ATTACHMENT, contents);
+      if (row.get(ATTACHMENT_NAMES) == null) {
+        row.put(ATTACHMENT_NAMES, new ArrayList<String>());
+      }
+      List<String> names = (List<String>) row.get(ATTACHMENT_NAMES);
+      names.add(fileName);
+      row.put(ATTACHMENT_NAMES, names);
+    }
+    else {
+      if (row.get(CONTENT) == null) {
+        row.put(CONTENT, new ArrayList<String>());
+      }
+      List<String> contents = (List<String>) row.get(CONTENT);
+      contents.add(content);
+      row.put(CONTENT, contents);
+    }
+  }
+
+  /** Best effort description of a part for logging - the getters throw too. */
+  private static String describePart(Part part) {
+    try {
+      return part.getContentType() + (part.getFileName() != null ? ": "+part.getFileName() : "");
+    }
+    catch (Exception e) {
+      return "unknown part";
+    }
   }
 
   private boolean addEnvelopToDocument(Part part, Map<String, Object> row) throws MessagingException {
