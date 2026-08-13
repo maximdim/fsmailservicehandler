@@ -7,9 +7,11 @@
 
   <properties>
     <java.version>1.8</java.version>
-    <!-- keep in step with mjb1:/usr/local/java/solr-home/gmail2/lib -->
+    <!-- keep in step with what mjb1 actually loads: solr-home/gmail2/lib for solr and tika,
+         solr-4.10.2/contrib/dataimporthandler-extras/lib for javax.mail -->
     <solr.version>4.10.2</solr.version>
     <tika.version>1.5</tika.version>
+    <mail.version>1.5.1</mail.version>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
   </properties>
 
@@ -46,9 +48,9 @@
       </exclusions>
     </dependency>
     <dependency>
-      <groupId>javax.mail</groupId>
-      <artifactId>mail</artifactId>
-      <version>1.4</version>
+      <groupId>com.sun.mail</groupId>
+      <artifactId>javax.mail</artifactId>
+      <version>${mail.version}</version>
     </dependency>
 
     <dependency>
