@@ -2,7 +2,9 @@ package org.apache.solr.handler.dataimport;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
 
 import java.io.File;
 import java.io.IOException;
@@ -104,6 +106,70 @@ public class FsMailEntityProcessorTest {
     p.getFolderFiles(tmp.getRoot(), null, found);
 
     assertEquals(2, found.size());
+  }
+
+  @Test
+  public void sinceIsTheLastIndexTimeMovedBackByTheRewind() throws Exception {
+    Date since = FsMailEntityProcessor.parseSince("2026-08-13 13:45:49", 10);
+
+    assertEquals(date(2026, 8, 13, 13, 35, 49), since);
+  }
+
+  @Test
+  public void aZeroRewindLeavesTheLastIndexTimeAlone() throws Exception {
+    Date since = FsMailEntityProcessor.parseSince("2026-08-13 13:45:49", 0);
+
+    assertEquals(date(2026, 8, 13, 13, 45, 49), since);
+  }
+
+  /** No recorded last index time, or one we can't read - index everything rather than nothing. */
+  @Test
+  public void missingOrUnreadableLastIndexTimeSelectsEveryFile() throws Exception {
+    assertNull("epoch placeholder", FsMailEntityProcessor.parseSince("1969-12-31 19:00:00", 10));
+    assertNull("absent", FsMailEntityProcessor.parseSince(null, 10));
+    assertNull("unparseable", FsMailEntityProcessor.parseSince("not a date", 10));
+  }
+
+  @Test
+  public void rewindDefaultsToTenMinutesWhenNotConfigured() throws Exception {
+    assertEquals(10, FsMailEntityProcessor.DEFAULT_SINCE_REWIND_MINUTES);
+    assertEquals(10, FsMailEntityProcessor.parseRewindMinutes(null));
+    assertEquals(10, FsMailEntityProcessor.parseRewindMinutes("  "));
+  }
+
+  @Test
+  public void configuredRewindOverridesTheDefault() throws Exception {
+    assertEquals(45, FsMailEntityProcessor.parseRewindMinutes("45"));
+    assertEquals(0, FsMailEntityProcessor.parseRewindMinutes("0"));
+    assertEquals(90, FsMailEntityProcessor.parseRewindMinutes(" 90 "));
+  }
+
+  /**
+   * A negative rewind moves the cutoff forward and skips files nothing has indexed yet, and the
+   * import would still report success. It has to fail loudly at startup.
+   */
+  @Test
+  public void aRewindThatWouldSkipFilesFailsTheImport() throws Exception {
+    assertRejected("-1");
+    assertRejected("sixty");
+    assertRejected("60m");
+  }
+
+  private static void assertRejected(String raw) {
+    try {
+      FsMailEntityProcessor.parseRewindMinutes(raw);
+      fail("should have rejected sinceRewindMinutes=[" + raw + "]");
+    }
+    catch (DataImportHandlerException expected) {
+      assertTrue(expected.getMessage(), expected.getMessage().contains("sinceRewindMinutes"));
+    }
+  }
+
+  private static Date date(int year, int month, int day, int hour, int minute, int second) {
+    Calendar cal = Calendar.getInstance();
+    cal.set(year, month - 1, day, hour, minute, second);
+    cal.set(Calendar.MILLISECOND, 0);
+    return cal.getTime();
   }
 
   /**

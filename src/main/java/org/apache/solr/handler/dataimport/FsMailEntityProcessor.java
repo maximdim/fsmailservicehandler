@@ -130,9 +130,11 @@ public class FsMailEntityProcessor extends EntityProcessorBase {
           "dataDir ["+this.dataDir.getAbsolutePath()+"] is not an existing directory");
     }
     this.ignoreFrom = Arrays.asList(getStringFromContext("ignoreFrom", "qwe123").split(","));
-    
+    this.sinceRewindMinutes = parseRewindMinutes(getStringFromContext("sinceRewindMinutes", null));
+
     LOG.info("datadir: "+this.dataDir);
     LOG.info("ignoreFrom: "+this.ignoreFrom);
+    LOG.info("sinceRewindMinutes: "+this.sinceRewindMinutes);
 
     // We don't distinguish between full and delta import here. Always need to be triggered
     // as FULL dump but we would look at date from 'dataimport.properties' to determine last index time
@@ -148,31 +150,70 @@ public class FsMailEntityProcessor extends EntityProcessorBase {
     this.fileNames = files.iterator();
   }
 
-  // The last index time is saved at the end of a run, so files written while that run was in
-  // progress would fall into the crack. Move the time back to cover that window, plus margin for
-  // a run that dies before writing its timestamp. Now that files are selected by modification
-  // time this only re-visits what was genuinely written in the last hour (~7 files per 5 minute
-  // run); it used to be 2 hours to paper over stale file name dates and re-indexed ~160 a run.
-  static final int SINCE_REWIND_MINUTES = 60;
+  // How far back before the recorded last index time the import reaches. Overridable with the
+  // 'sinceRewindMinutes' entity attribute.
+  //
+  // last_index_time is stamped with the moment the import *started*, and run.sh writes every file
+  // before it fires the import, so in the normal case nothing would be missed with no rewind at
+  // all. The margin covers the abnormal case: a file written while a walk is already in progress,
+  // or a clock that stepped. Ten minutes is two 5 minute backup runs.
+  //
+  // It is not free - every run re-indexes whatever was written inside the window. Measured on
+  // mjb1, 60 minutes meant ~48 documents a run against ~4 genuinely new ones.
+  static final int DEFAULT_SINCE_REWIND_MINUTES = 10;
+
+  private int sinceRewindMinutes = DEFAULT_SINCE_REWIND_MINUTES;
 
   private Date getSince(Context c) {
     // perhaps there is a better way to get last index time?
-    String sinceStr = context.replaceTokens("${dataimporter.last_index_time}");
-    if (!sinceStr.contains("1969")) { // if there are no last delta time (e.g. file removed) date in 1969 is returned
-      SimpleDateFormat df = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
-      try {
-        Date date = df.parse(sinceStr);
-        Calendar cal = Calendar.getInstance();
-        cal.setTime(date);
-        cal.add(Calendar.MINUTE, -SINCE_REWIND_MINUTES);
-        LOG.info("Since date " + date + "->" + cal.getTime());
-        return cal.getTime();
-      } 
-      catch (ParseException e) {
-        LOG.error("Failed to parse date: ["+sinceStr+"]");
-      }
+    return parseSince(c.replaceTokens("${dataimporter.last_index_time}"), this.sinceRewindMinutes);
+  }
+
+  /**
+   * @return the cutoff {@link #shouldAcceptFile} selects on, or null to accept every file
+   */
+  static Date parseSince(String sinceStr, int rewindMinutes) {
+    // if there are no last delta time (e.g. file removed) date in 1969 is returned
+    if (sinceStr == null || sinceStr.contains("1969")) {
+      return null;
     }
-    return null;
+    SimpleDateFormat df = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
+    try {
+      Date date = df.parse(sinceStr);
+      Calendar cal = Calendar.getInstance();
+      cal.setTime(date);
+      cal.add(Calendar.MINUTE, -rewindMinutes);
+      LOG.info("Since date " + date + "->" + cal.getTime() + " (rewind " + rewindMinutes + "m)");
+      return cal.getTime();
+    }
+    catch (ParseException e) {
+      LOG.error("Failed to parse date: ["+sinceStr+"]");
+      return null;
+    }
+  }
+
+  /**
+   * A bad value here is silently destructive: a negative rewind moves the cutoff *forward*, so
+   * files that were never indexed are skipped and the import still reports success. Fail the
+   * import instead of quietly losing mail.
+   */
+  static int parseRewindMinutes(String raw) {
+    if (raw == null || raw.trim().isEmpty()) {
+      return DEFAULT_SINCE_REWIND_MINUTES;
+    }
+    int minutes;
+    try {
+      minutes = Integer.parseInt(raw.trim());
+    }
+    catch (NumberFormatException e) {
+      throw new DataImportHandlerException(DataImportHandlerException.SEVERE,
+          "'sinceRewindMinutes' is not a number: ["+raw+"]");
+    }
+    if (minutes < 0) {
+      throw new DataImportHandlerException(DataImportHandlerException.SEVERE,
+          "'sinceRewindMinutes' must not be negative: "+minutes);
+    }
+    return minutes;
   }
   
   @Override
