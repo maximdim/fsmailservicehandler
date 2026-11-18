@@ -1,0 +1,177 @@
+name: Build and release
+
+on:
+  push:
+    branches:
+      - master
+      - 'feature/*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 2
+
+      # Modelled on blp2's build-and-release-mjb.yml. The question is "is this version still
+      # unreleased?", not "did the version change in this commit", so a failed release can be
+      # retried by re-running the job or pushing a fix with the same version.
+      #
+      # A -SNAPSHOT version is never released: it is built and tested only. Drop the suffix to
+      # release.
+      #
+      # publish: no tag yet - tag this commit and release it.
+      # finish:  the tag is already on this very commit, but its release never got its jar (an
+      #          upload failed after the tag was pushed). Re-running completes it.
+      - name: Does this version still need releasing?
+        id: release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          VERSION=$(sed -n '0,/^  <version>/{s/^  <version>\(.*\)<\/version>/\1/p}' pom.xml)
+          if [ -z "$VERSION" ]; then
+            echo "could not read the project version from pom.xml"
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+          if [[ "$VERSION" == *-SNAPSHOT ]]; then
+            echo "$VERSION is a snapshot; build and test only."
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "finish=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          TAG="v${VERSION}"
+          TAGGED=$(git ls-remote origin "refs/tags/${TAG}^{}" | cut -f1)
+          if [ -z "$TAGGED" ]; then
+            TAGGED=$(git ls-remote origin "refs/tags/${TAG}" | cut -f1)
+          fi
+
+          # Jars on the published release; empty for a draft or none.
+          RELEASED_JARS=""
+          if [ -n "$TAGGED" ]; then
+            RELEASED_JARS=$(gh release view "$TAG" --json isDraft,assets \
+              -q 'select(.isDraft | not) | .assets[].name | select(endswith(".jar"))' 2>/dev/null || true)
+          fi
+
+          if [ -z "$TAGGED" ]; then
+            echo "$TAG has no tag yet; this is a release build."
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+            echo "finish=false" >> "$GITHUB_OUTPUT"
+          elif [ "$TAGGED" = "$GITHUB_SHA" ] && [ -z "$RELEASED_JARS" ]; then
+            echo "$TAG is on this commit but its release is unfinished; completing it."
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "finish=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "$TAG is already released; build and test only."
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "finish=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Java 8: the jar runs inside Solr 4.10 on mjb1's 32-bit Java 8.
+      - name: Set up JDK
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '8'
+
+      - name: Compute pom hash ignoring project version bumps
+        run: sed '0,/^  <version>/{//d}' pom.xml > pom-cache-key.xml
+
+      - name: Cache Maven repository
+        uses: actions/cache@v6
+        with:
+          path: ~/.m2/repository
+          key: maven-${{ runner.os }}-${{ hashFiles('pom-cache-key.xml') }}
+          restore-keys: |
+            maven-${{ runner.os }}-
+
+      - name: Build & test
+        run: mvn -B clean verify
+
+      - name: Create tag for new version
+        if: steps.release.outputs.publish == 'true'
+        run: |
+          set -euo pipefail
+          VERSION=${{ steps.release.outputs.version }}
+          TAG="v${VERSION}"
+
+          # Asked of the remote rather than locally: the checkout is shallow (fetch-depth 2).
+          # ^{} dereferences an annotated tag to its commit; lightweight tags have no such ref.
+          EXISTING=$(git ls-remote origin "refs/tags/${TAG}^{}" | cut -f1)
+          if [ -z "$EXISTING" ]; then
+            EXISTING=$(git ls-remote origin "refs/tags/${TAG}" | cut -f1)
+          fi
+
+          if [ -n "$EXISTING" ]; then
+            if [ "$EXISTING" = "$GITHUB_SHA" ]; then
+              echo "Tag $TAG already on this commit - re-run, nothing to do."
+              exit 0
+            fi
+            echo "ERROR: $TAG already exists and points at $EXISTING,"
+            echo "       but this build is $GITHUB_SHA."
+            echo "       Publishing would attach the jar to source that did not build it."
+            echo "       Bump the version, or delete the stale tag deliberately."
+            exit 1
+          fi
+
+          git config user.name "${GITHUB_ACTOR}"
+          git config user.email "${GITHUB_ACTOR}@users.noreply.github.com"
+          git tag "$TAG"
+          git push origin "$TAG"
+
+      # The release carries the processor jar and the runtime libraries it needs that mjb1 does
+      # not already provide (target/lib, from the pom's copy-dependencies), so a deploy is
+      # "put these jars in solr-home/gmail2/lib". gh CLI rather than an action, as in blp2:
+      # created as a draft and published only once every jar is on it, so a failure leaves a
+      # draft that the "finish" path picks up on re-run. --verify-tag: release the tag pushed
+      # above, never one the API would create on the default branch.
+      - name: Create GitHub Release
+        if: steps.release.outputs.publish == 'true' || steps.release.outputs.finish == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: v${{ steps.release.outputs.version }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          MAIN=(target/fsmailservicehandler-"$VERSION".jar)
+          if [ "${#MAIN[@]}" -ne 1 ]; then
+            echo "expected target/fsmailservicehandler-$VERSION.jar"
+            exit 1
+          fi
+          JARS=("${MAIN[0]}" target/lib/*.jar)
+
+          {
+            echo "Deploy: put these jars in \`solr-home/gmail2/lib\` on mjb1, replacing the previous"
+            echo "\`fsmailservicehandler-*.jar\`, then restart Jetty."
+            echo
+            for j in "${JARS[@]}"; do
+              echo "- \`$(basename "$j")\` sha1 \`$(sha1sum "$j" | cut -d' ' -f1)\`"
+            done
+          } > release-notes.md
+
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --verify-tag --draft --title "$TAG" --notes-file release-notes.md
+          fi
+
+          for attempt in 1 2 3 4 5; do
+            if gh release upload "$TAG" "${JARS[@]}" --clobber; then
+              break
+            fi
+            if [ "$attempt" -eq 5 ]; then
+              echo "upload failed $attempt times"
+              exit 1
+            fi
+            sleep $((attempt * 15))
+          done
+
+          gh release edit "$TAG" --notes-file release-notes.md --draft=false --latest
