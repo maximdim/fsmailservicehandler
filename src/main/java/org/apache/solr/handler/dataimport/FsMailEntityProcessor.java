@@ -17,10 +17,17 @@
 package org.apache.solr.handler.dataimport;
 
 import java.io.BufferedInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileFilter;
 import java.io.FileInputStream;
+import java.io.IOException;
 import java.io.InputStream;
+import java.nio.ByteBuffer;
+import java.nio.charset.CharacterCodingException;
+import java.nio.charset.Charset;
+import java.nio.charset.CodingErrorAction;
+import java.nio.charset.StandardCharsets;
 import java.text.ParseException;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
@@ -48,12 +55,16 @@ import javax.mail.internet.AddressException;
 import javax.mail.internet.ContentType;
 import javax.mail.internet.InternetAddress;
 import javax.mail.internet.MimeMessage;
+import javax.mail.internet.MimeUtility;
 
 import org.apache.commons.codec.digest.DigestUtils;
-import org.apache.tika.Tika;
-import org.apache.tika.metadata.HttpHeaders;
-import org.apache.tika.metadata.Metadata;
-import org.apache.tika.metadata.TikaMetadataKeys;
+import org.jsoup.Jsoup;
+import org.jsoup.nodes.Document;
+import org.jsoup.nodes.Element;
+import org.jsoup.nodes.Node;
+import org.jsoup.nodes.TextNode;
+import org.jsoup.select.NodeTraversor;
+import org.jsoup.select.NodeVisitor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -91,7 +102,8 @@ public class FsMailEntityProcessor extends EntityProcessorBase {
   private static final String TO_CC_BCC_CLEAN = "allTo_clean";
   private static final String FLAGS = "flags";
   private static final String CONTENT = "content";
-  private static final String ATTACHMENT = "attachment";
+  // No "attachment" field any more: attachments are never opened, see addContentFromPart. The
+  // schema's field of that name was never indexed or stored, so nothing read what went into it.
   private static final String ATTACHMENT_NAMES = "attachmentNames";
   // flag values
   private static final String FLAG_ANSWERED = "answered";
@@ -101,7 +113,6 @@ public class FsMailEntityProcessor extends EntityProcessorBase {
   private static final String FLAG_RECENT = "recent";
   private static final String FLAG_SEEN = "seen";
 
-  private final Tika tika = new Tika();
   private final Session session = Session.getDefaultInstance(new Properties(), null);
 
   private File dataDir;
@@ -314,7 +325,7 @@ public class FsMailEntityProcessor extends EntityProcessorBase {
 
   /**
    * Indexes a nested part, absorbing anything it throws. One part we can't read - a detached
-   * pkcs7 signature Tika refuses, an encrypted attachment, a malformed Content-Type - used to
+   * pkcs7 signature the parser refused, an encrypted attachment, a malformed Content-Type - used to
    * abort the whole message, so a signed mail was dropped entirely rather than losing just its
    * signature. Whatever else the message carries is still worth indexing.
    */
@@ -327,50 +338,193 @@ public class FsMailEntityProcessor extends EntityProcessorBase {
     }
   }
 
-  /** Extracts the text of a leaf part into the content or attachment field. */
-  @SuppressWarnings("unchecked")
+  // A part's text is cut at this many characters. Tika.parseToString() capped it there, so the
+  // stored content field stays the size it was.
+  static final int MAX_TEXT_CHARS = 100 * 1000;
+  // At most this much of a part is read to get that text. An HTML body can carry megabytes of
+  // inline base64 images around a few lines of writing.
+  static final int MAX_PART_BYTES = 4 * 1024 * 1024;
+
+  /**
+   * Indexes a leaf part. Attachments are recorded by name and never opened. Of the rest, HTML is
+   * reduced to its text and every other text type is read as plain text, as Tika's text parser
+   * did: calendar invites, returned headers and delivery reports were searchable that way and
+   * still are. XML is read as characters and never parsed, so no entity can resolve.
+   *
+   * Every part used to go through Tika 1.5's auto-detecting parser - PDF, Office, archives, XML,
+   * images, audio - inside the JVM that also serves blp2, on mail anyone can send. That Tika has
+   * XXE and decompression-bomb CVEs, and what it made of attachments went into a field the schema
+   * neither indexes nor stores. In 6,000 messages from November 2026, about 1,900 attachments
+   * were parsed for nothing, while the searchable body came from 5,451 text/plain and 563
+   * text/html parts. Non-text inline parts (1,138 images and one PDF) gave it nothing.
+   */
   private void addContentFromPart(Part part, ContentType ctype, Map<String, Object> row) {
-    String content;
-    String fileName;
-    String disp;
     try {
-      disp = part.getDisposition();
-      fileName = part.getFileName();
-      @SuppressWarnings("resource") // Tika will close stream
-      InputStream is = part.getInputStream();
-      Metadata md = new Metadata();
-      md.set(HttpHeaders.CONTENT_TYPE, ctype.getBaseType().toLowerCase(Locale.ROOT));
-      md.set(TikaMetadataKeys.RESOURCE_NAME_KEY, fileName);
-      content = this.tika.parseToString(is, md);
+      if (isSignature(ctype)) {
+        // a detached S/MIME signature (smime.p7s): Tika used to refuse it, so its name was never
+        // listed, and listing it now would add noise to every signed mail in blp2's mail view
+        return;
+      }
+      String disp = part.getDisposition();
+      if (disp != null && disp.equalsIgnoreCase(Part.ATTACHMENT)) {
+        String fileName = part.getFileName();
+        if (fileName != null) {
+          addToList(row, ATTACHMENT_NAMES, fileName);
+        }
+        return;
+      }
+      boolean html = ctype.match("text/html");
+      if (!"text".equalsIgnoreCase(ctype.getPrimaryType()) && !isPlainTextReport(ctype)) {
+        return;
+      }
+      byte[] bytes = readCapped(part.getInputStream(), MAX_PART_BYTES);
+      String charset = ctype.getParameter("charset");
+      String text = html
+          ? htmlToText(bytes, charset)
+          : decode(bytes, charset);
+      addToList(row, CONTENT, text.length() > MAX_TEXT_CHARS ? text.substring(0, MAX_TEXT_CHARS) : text);
     }
     catch (Exception e) {
       // see addPartQuietly - an unreadable part must not cost us the rest of the message
       LOG.warn("Skipping unreadable message part ["+describePart(part)+"]: "+e.getMessage());
-      return;
     }
+  }
 
-    if (disp != null && disp.equalsIgnoreCase(Part.ATTACHMENT)) {
-      if (row.get(ATTACHMENT) == null) {
-        row.put(ATTACHMENT, new ArrayList<String>());
-      }
-      List<String> contents = (List<String>) row.get(ATTACHMENT);
-      contents.add(content);
-      row.put(ATTACHMENT, contents);
-      if (row.get(ATTACHMENT_NAMES) == null) {
-        row.put(ATTACHMENT_NAMES, new ArrayList<String>());
-      }
-      List<String> names = (List<String>) row.get(ATTACHMENT_NAMES);
-      names.add(fileName);
-      row.put(ATTACHMENT_NAMES, names);
+  /** Bounce and read-receipt bodies: plain text by format (RFC 3464, RFC 8098), which Tika indexed. */
+  private static boolean isPlainTextReport(ContentType ctype) {
+    return ctype.match("message/delivery-status") || ctype.match("message/disposition-notification");
+  }
+
+  private static boolean isSignature(ContentType ctype) {
+    String base = ctype.getBaseType().toLowerCase(Locale.ROOT);
+    return base.equals("application/pkcs7-signature") || base.equals("application/x-pkcs7-signature");
+  }
+
+  @SuppressWarnings("unchecked")
+  private static void addToList(Map<String, Object> row, String field, String value) {
+    List<String> values = (List<String>) row.get(field);
+    if (values == null) {
+      values = new ArrayList<String>();
+      row.put(field, values);
     }
-    else {
-      if (row.get(CONTENT) == null) {
-        row.put(CONTENT, new ArrayList<String>());
+    values.add(value);
+  }
+
+  static byte[] readCapped(InputStream is, int max) throws IOException {
+    try {
+      ByteArrayOutputStream out = new ByteArrayOutputStream();
+      byte[] buf = new byte[8192];
+      int n;
+      while (out.size() < max && (n = is.read(buf, 0, Math.min(buf.length, max - out.size()))) > 0) {
+        out.write(buf, 0, n);
       }
-      List<String> contents = (List<String>) row.get(CONTENT);
-      contents.add(content);
-      row.put(CONTENT, contents);
+      return out.toByteArray();
     }
+    finally {
+      is.close();
+    }
+  }
+
+  private static final Charset WINDOWS_1252 = Charset.forName("windows-1252");
+
+  /**
+   * Decodes a text part with the charset it declares. A part that declares none, names one Java
+   * doesn't know, or claims US-ASCII while carrying 8-bit bytes is read as UTF-8 if it is valid
+   * UTF-8, and otherwise as windows-1252, the Latin-1 superset that undeclared 8-bit mail
+   * nearly always is. A declared ISO-8859-1 is read as windows-1252 too, as browsers do: mail
+   * labelled Latin-1 routinely carries Windows' euro sign, quotes and dashes in 0x80-0x9F.
+   */
+  static String decode(byte[] bytes, String mimeCharset) {
+    // JavaMail maps the label "us-ascii" to ISO-8859-1, so test the label, not the Charset
+    boolean saysAscii = mimeCharset != null
+        && mimeCharset.trim().replace("\"", "").equalsIgnoreCase("us-ascii");
+    Charset declared = saysAscii && hasHighBit(bytes) ? null : charsetOf(mimeCharset);
+    if (declared != null) {
+      return new String(bytes, declared.equals(StandardCharsets.ISO_8859_1) ? WINDOWS_1252 : declared);
+    }
+    try {
+      return StandardCharsets.UTF_8.newDecoder()
+          .onMalformedInput(CodingErrorAction.REPORT)
+          .onUnmappableCharacter(CodingErrorAction.REPORT)
+          .decode(ByteBuffer.wrap(bytes)).toString();
+    }
+    catch (CharacterCodingException e) {
+      return new String(bytes, WINDOWS_1252);
+    }
+  }
+
+  private static Charset charsetOf(String mimeCharset) {
+    if (mimeCharset == null || mimeCharset.trim().isEmpty()) {
+      return null;
+    }
+    try {
+      return Charset.forName(MimeUtility.javaCharset(mimeCharset.trim()));
+    }
+    catch (IllegalArgumentException e) {   // illegal or unsupported charset name
+      return null;
+    }
+  }
+
+  private static boolean hasHighBit(byte[] bytes) {
+    for (byte b : bytes) {
+      if (b < 0) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * The text of an HTML body, each block element on a line of its own. Like Tika's
+   * BodyContentHandler, which parseToString used, it takes the body only: no title, script or
+   * style.
+   */
+  static String htmlToText(byte[] bytes, String mimeCharset) {
+    Document doc = Jsoup.parse(decode(bytes, mimeCharset));
+    doc.select("script, style, noscript, template").remove();
+    final StringBuilder sb = new StringBuilder();
+    NodeTraversor.traverse(new NodeVisitor() {
+      @Override
+      public void head(Node node, int depth) {
+        if (node instanceof TextNode) {
+          sb.append(((TextNode) node).text());
+        }
+        else if (node instanceof Element && "br".equals(((Element) node).normalName())) {
+          sb.append('\n');
+        }
+        else if (node instanceof Element && ((Element) node).isBlock()) {
+          newLine();   // a block starts on a line of its own, as well as ending one
+        }
+      }
+
+      @Override
+      public void tail(Node node, int depth) {
+        if (node instanceof Element && ((Element) node).isBlock()) {
+          newLine();
+        }
+      }
+
+      private void newLine() {
+        if (sb.length() > 0 && sb.charAt(sb.length() - 1) != '\n') {
+          sb.append('\n');
+        }
+      }
+    }, doc.body());
+    StringBuilder out = new StringBuilder();
+    int blank = 0;
+    for (String line : sb.toString().split("\n")) {
+      line = line.trim();
+      if (line.isEmpty()) {
+        blank++;
+        continue;
+      }
+      if (out.length() > 0) {
+        out.append(blank > 0 ? "\n\n" : "\n");
+      }
+      out.append(line);
+      blank = 0;
+    }
+    return out.toString();
   }
 
   /** Best effort description of a part for logging - the getters throw too. */
