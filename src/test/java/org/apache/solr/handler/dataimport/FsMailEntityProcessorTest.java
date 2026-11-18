@@ -9,7 +9,9 @@ import static org.junit.Assert.fail;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Calendar;
 import java.util.Date;
 import java.util.HashMap;
@@ -234,6 +236,210 @@ public class FsMailEntityProcessorTest {
 
     assertEquals("broken body", row.get("subject"));
     assertEquals("alice@example.com", row.get("from_clean"));
+  }
+
+  /**
+   * The point of dropping Tika: an attachment is recorded by name and its bytes are never read,
+   * so nothing in a hostile file can reach a parser.
+   */
+  @Test
+  public void attachmentsAreNamedButNeverOpened() throws Exception {
+    Session session = Session.getDefaultInstance(new Properties(), null);
+    MimeMessage msg = new MimeMessage(session);
+    msg.setFrom(new InternetAddress("alice@example.com"));
+    msg.setRecipients(Message.RecipientType.TO, "bob@example.com");
+    msg.setSubject("cv attached");
+    MimeBodyPart body = new MimeBodyPart();
+    body.setText("please find my resume attached");
+    MimeMultipart mp = new MimeMultipart();
+    mp.addBodyPart(body);
+    for (String name : new String[] {"resume.pdf", "evil.xml", "bomb.zip"}) {
+      MimeBodyPart attachment = new MimeBodyPart() {
+        @Override
+        public InputStream getInputStream() {
+          throw new AssertionError("attachment " + name + " was opened");
+        }
+      };
+      attachment.setContent("<!DOCTYPE x [<!ENTITY e SYSTEM \"file:///etc/passwd\">]><x>&e;</x>", "application/octet-stream");
+      attachment.setFileName(name);
+      mp.addBodyPart(attachment);
+    }
+    msg.setContent(mp);
+    msg.saveChanges();
+
+    Map<String, Object> row = new HashMap<String, Object>();
+    assertTrue(new FsMailEntityProcessor().addPartToDocument(msg, row, true));
+
+    assertEquals(Arrays.asList("resume.pdf", "evil.xml", "bomb.zip"), row.get("attachmentNames"));
+    assertEquals(Arrays.asList("please find my resume attached"), row.get("content"));
+    assertFalse("the unused attachment field is no longer filled", row.containsKey("attachment"));
+  }
+
+  @Test
+  public void anAttachmentWithoutAFileNameAddsNoName() throws Exception {
+    Map<String, Object> row = index(
+        "Content-Type: multipart/mixed; boundary=b\r\n\r\n"
+        + "--b\r\nContent-Type: text/plain\r\n\r\nbody\r\n"
+        + "--b\r\nContent-Type: application/pdf\r\nContent-Disposition: attachment\r\n\r\n%PDF-1.4\r\n"
+        + "--b--\r\n");
+
+    assertNull(row.get("attachmentNames"));
+    assertEquals(Arrays.asList("body"), row.get("content"));
+  }
+
+  @Test
+  public void aDetachedSignatureIsNotListedAsAnAttachment() throws Exception {
+    Map<String, Object> row = index(
+        "Content-Type: multipart/signed; protocol=\"application/pkcs7-signature\"; boundary=b\r\n\r\n"
+        + "--b\r\nContent-Type: text/plain\r\n\r\nsigned body\r\n"
+        + "--b\r\nContent-Type: application/pkcs7-signature; name=smime.p7s\r\n"
+        + "Content-Disposition: attachment; filename=smime.p7s\r\nContent-Transfer-Encoding: base64\r\n\r\nMIAGCSqG\r\n"
+        + "--b--\r\n");
+
+    assertEquals(Arrays.asList("signed body"), row.get("content"));
+    assertNull(row.get("attachmentNames"));
+  }
+
+  /** Inline images (signature logos) and the odd inline PDF gave Tika nothing; they are skipped unread. */
+  @Test
+  public void nonTextInlinePartsAreSkipped() throws Exception {
+    Map<String, Object> row = index(
+        "Content-Type: multipart/related; boundary=b\r\n\r\n"
+        + "--b\r\nContent-Type: text/plain\r\n\r\nsee logo\r\n"
+        + "--b\r\nContent-Type: image/png\r\nContent-Disposition: inline; filename=image001.png\r\n"
+        + "Content-Transfer-Encoding: base64\r\n\r\niVBORw0KGgo=\r\n"
+        + "--b\r\nContent-Type: application/pdf\r\n\r\n%PDF-1.4\r\n"
+        + "--b--\r\n");
+
+    assertEquals(Arrays.asList("see logo"), row.get("content"));
+    assertNull("inline parts were never listed as attachments", row.get("attachmentNames"));
+  }
+
+  /**
+   * Every text type is read as plain text, as Tika's text parser read it - calendar invites and
+   * bounce reports were searchable - but XML is never parsed, so no entity resolves.
+   */
+  @Test
+  public void otherTextTypesAndReportsAreReadAsPlainText() throws Exception {
+    Map<String, Object> row = index(
+        "Content-Type: multipart/mixed; boundary=b\r\n\r\n"
+        + "--b\r\nContent-Type: text/plain\r\n\r\nthe body\r\n"
+        + "--b\r\nContent-Type: text/xml\r\n\r\n<!DOCTYPE x [<!ENTITY e SYSTEM \"file:///etc/passwd\">]><x>&e;</x>\r\n"
+        + "--b\r\nContent-Type: text/calendar; method=REQUEST\r\n\r\nSUMMARY:Interview with Bob\r\n"
+        + "--b\r\nContent-Type: message/delivery-status\r\n\r\nStatus: 5.1.1\r\n"
+        + "--b\r\nContent-Type: application/json\r\n\r\n{\"not\": \"text\"}\r\n"
+        + "--b--\r\n");
+
+    String content = contentOf(row);
+    assertTrue(content, content.contains("the body"));
+    assertTrue(content, content.contains("&e;"));
+    assertFalse(content, content.contains("root:"));
+    assertTrue(content, content.contains("SUMMARY:Interview with Bob"));
+    assertTrue(content, content.contains("Status: 5.1.1"));
+    assertFalse(content, content.contains("not"));
+  }
+
+  @Test
+  public void htmlBodyBecomesTextWithoutMarkupScriptOrTitle() throws Exception {
+    Map<String, Object> row = index(
+        "Content-Type: text/html; charset=utf-8\r\n\r\n"
+        + "<html><head><title>Newsletter</title><style>p { color: red }</style></head><body>"
+        + "<script>var tracking = 1;</script>"
+        + "<p>Dear&nbsp;Bob,</p><div>Interview at <b>10:00</b> &amp; lunch</div>Line one<br>Line two"
+        + "<ul><li>first</li><li>second</li></ul><p>para</p><br><br><p>after a gap</p></body></html>\r\n");
+
+    // &nbsp; comes out as a plain space, which is what a search wants
+    assertEquals(Arrays.asList("Dear Bob,\nInterview at 10:00 & lunch\nLine one\nLine two\nfirst\nsecond\npara\n\nafter a gap"),
+        row.get("content"));
+  }
+
+  @Test
+  public void declaredCharsetIsHonouredThroughTransferEncodings() throws Exception {
+    // "Caf\u00e9 Zo\u00eb" in ISO-8859-1, quoted-printable, and in windows-1252 base64
+    assertEquals(Arrays.asList("Caf\u00e9 Zo\u00eb"), index(
+        "Content-Type: text/plain; charset=iso-8859-1\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\n"
+        + "Caf=E9 Zo=EB").get("content"));
+    assertEquals(Arrays.asList("Caf\u00e9 Zo\u00eb"), index(
+        "Content-Type: text/plain; charset=windows-1252\r\nContent-Transfer-Encoding: base64\r\n\r\n"
+        + "Q2Fm6SBab+s=\r\n").get("content"));
+    assertEquals(Arrays.asList("Caf\u00e9"), index(
+        "Content-Type: text/html; charset=\"ISO-8859-1\"\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\n"
+        + "<p>Caf=E9</p>").get("content"));
+  }
+
+  /** No charset, an unknown one, or "us-ascii" over 8-bit bytes: UTF-8 if valid, else windows-1252. */
+  @Test
+  public void undeclaredOrWrongCharsetIsGuessed() throws Exception {
+    byte[] utf8 = "Caf\u00e9 \u20ac5".getBytes(StandardCharsets.UTF_8);
+    byte[] latin = "Caf\u00e9 \u20ac5".getBytes("windows-1252");
+
+    assertEquals("Caf\u00e9 \u20ac5", FsMailEntityProcessor.decode(utf8, null));
+    assertEquals("Caf\u00e9 \u20ac5", FsMailEntityProcessor.decode(latin, null));
+    assertEquals("Caf\u00e9 \u20ac5", FsMailEntityProcessor.decode(latin, "x-unknown"));
+    assertEquals("Caf\u00e9 \u20ac5", FsMailEntityProcessor.decode(latin, "us-ascii"));
+    assertEquals("Caf\u00e9 \u20ac5", FsMailEntityProcessor.decode(utf8, "us-ascii"));
+    assertEquals("plain", FsMailEntityProcessor.decode("plain".getBytes(StandardCharsets.US_ASCII), "us-ascii"));
+  }
+
+  /** Unchanged behaviour: only the first alternative is read, so a body is not indexed twice. */
+  @Test
+  public void onlyTheFirstAlternativeIsIndexed() throws Exception {
+    Map<String, Object> row = index(
+        "Content-Type: multipart/alternative; boundary=b\r\n\r\n"
+        + "--b\r\nContent-Type: text/plain\r\n\r\nplain version\r\n"
+        + "--b\r\nContent-Type: text/html\r\n\r\n<p>html version</p>\r\n"
+        + "--b--\r\n");
+
+    assertEquals(Arrays.asList("plain version"), row.get("content"));
+  }
+
+  /** Unchanged behaviour: a forwarded message's body and attachment names count as this one's. */
+  @Test
+  public void aForwardedMessageIsIndexedWithItsAttachmentNames() throws Exception {
+    Map<String, Object> row = index(
+        "Content-Type: multipart/mixed; boundary=outer\r\n\r\n"
+        + "--outer\r\nContent-Type: text/plain\r\n\r\nFYI\r\n"
+        + "--outer\r\nContent-Type: message/rfc822\r\n\r\n"
+        + "From: carol@example.com\r\nSubject: original\r\n"
+        + "Content-Type: multipart/mixed; boundary=inner\r\n\r\n"
+        + "--inner\r\nContent-Type: text/plain\r\n\r\nthe original text\r\n"
+        + "--inner\r\nContent-Type: application/pdf; name=offer.pdf\r\n"
+        + "Content-Disposition: attachment; filename=offer.pdf\r\n\r\n%PDF-1.4\r\n"
+        + "--inner--\r\n"
+        + "\r\n--outer--\r\n");
+
+    assertEquals(Arrays.asList("FYI", "the original text"), row.get("content"));
+    assertEquals(Arrays.asList("offer.pdf"), row.get("attachmentNames"));
+  }
+
+  @Test
+  public void textIsCappedWhereTikaCappedIt() throws Exception {
+    StringBuilder big = new StringBuilder();
+    while (big.length() < FsMailEntityProcessor.MAX_TEXT_CHARS + 5000) {
+      big.append("lorem ipsum ");
+    }
+    Map<String, Object> row = index("Content-Type: text/plain\r\n\r\n" + big);
+
+    assertEquals(FsMailEntityProcessor.MAX_TEXT_CHARS, contentOf(row).length() - 2);   // List.toString's brackets
+  }
+
+  @Test
+  public void readingStopsAtTheByteCap() throws Exception {
+    byte[] data = new byte[100];
+    assertEquals(40, FsMailEntityProcessor.readCapped(new java.io.ByteArrayInputStream(data), 40).length);
+    assertEquals(100, FsMailEntityProcessor.readCapped(new java.io.ByteArrayInputStream(data), 4096).length);
+  }
+
+  /** Parses a raw message (headers given after a fixed envelope) the way the import reads files. */
+  private static Map<String, Object> index(String mimeHeadersAndBody) throws Exception {
+    String raw = "From: alice@example.com\r\nTo: bob@example.com\r\nSubject: test\r\n"
+        + "Date: Wed, 18 Nov 2026 10:00:00 -0500\r\nMIME-Version: 1.0\r\n" + mimeHeadersAndBody;
+    Session session = Session.getDefaultInstance(new Properties(), null);
+    MimeMessage msg = new MimeMessage(session,
+        new java.io.ByteArrayInputStream(raw.getBytes(StandardCharsets.ISO_8859_1)));
+    Map<String, Object> row = new HashMap<String, Object>();
+    assertTrue(new FsMailEntityProcessor().addPartToDocument(msg, row, true));
+    return row;
   }
 
   @SuppressWarnings("unchecked")

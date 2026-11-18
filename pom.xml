@@ -3,15 +3,16 @@
   <modelVersion>4.0.0</modelVersion>
   <groupId>com.maximdim</groupId>
   <artifactId>fsmailservicehandler</artifactId>
-  <version>0.0.4-SNAPSHOT</version>
+  <version>0.0.5</version>
 
   <properties>
     <java.version>1.8</java.version>
-    <!-- keep in step with what mjb1 actually loads: solr-home/gmail2/lib for solr and tika,
+    <!-- keep in step with what mjb1 actually loads: solr-home/gmail2/lib for jsoup and this jar,
          solr-4.10.2/contrib/dataimporthandler-extras/lib for javax.mail -->
     <solr.version>4.10.2</solr.version>
-    <tika.version>1.5</tika.version>
     <mail.version>1.5.1</mail.version>
+    <!-- the version blp2 ships; 1.23.x still runs on Java 8 -->
+    <jsoup.version>1.23.2</jsoup.version>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
   </properties>
 
@@ -24,6 +25,25 @@
           <source>${java.version}</source>
           <target>${java.version}</target>
         </configuration>
+      </plugin>
+      <!-- target/lib: the runtime jars mjb1 does not already provide (solr and javax.mail are
+           provided), which the release workflow attaches next to this jar -->
+      <plugin>
+        <artifactId>maven-dependency-plugin</artifactId>
+        <version>3.8.1</version>
+        <executions>
+          <execution>
+            <id>copy-runtime-dependencies</id>
+            <phase>package</phase>
+            <goals>
+              <goal>copy-dependencies</goal>
+            </goals>
+            <configuration>
+              <includeScope>runtime</includeScope>
+              <outputDirectory>${project.build.directory}/lib</outputDirectory>
+            </configuration>
+          </execution>
+        </executions>
       </plugin>
     </plugins>
   </build>
@@ -47,21 +67,20 @@
         </exclusion>
       </exclusions>
     </dependency>
+    <!-- provided by Jetty's lib/mail on mjb1, so not shipped with the release -->
     <dependency>
       <groupId>com.sun.mail</groupId>
       <artifactId>javax.mail</artifactId>
       <version>${mail.version}</version>
+      <scope>provided</scope>
     </dependency>
 
+    <!-- HTML bodies to text. Tika is gone: attachments are no longer opened, and plain text needs
+         no parser. -->
     <dependency>
-      <groupId>org.apache.tika</groupId>
-      <artifactId>tika-core</artifactId>
-      <version>${tika.version}</version>
-    </dependency>
-    <dependency>
-      <groupId>org.apache.tika</groupId>
-      <artifactId>tika-parsers</artifactId>
-      <version>${tika.version}</version>
+      <groupId>org.jsoup</groupId>
+      <artifactId>jsoup</artifactId>
+      <version>${jsoup.version}</version>
     </dependency>
 
     <dependency>
